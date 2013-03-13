@@ -1,0 +1,158 @@
+Secure RTP (SRTP) and UST Reference Implementations
+David A. McGrew
+Cisco Systems, Inc.
+mcgrew@cisco.com
+
+
+This package provides an implementation of the Secure Real-time
+Transport Protocol (SRTP), the Universal Security Transform (UST), and
+a supporting cryptographic kernel.  These mechanisms are documented in
+the Internet Drafts in the doc/ subdirectory.  The SRTP API is
+documented in include/srtp.h, and the library is in libsrtp.a (after
+compilation).
+
+This package is a derivative of the libsrtp package.  It has been 
+modified to use OpenSSL for crypto operations.  All the original
+crypto primitives in libsrtp have been removed.  This provides the
+following benefits:
+    - A FIPS compliant OpenSSL library can be linked with this
+      package to claim FIPS compliance on the SRTP protocol.
+    - The OpenSSL engine interface is utilized, allowing crypto
+      operations to be off-loaded to a hardware accelerator that
+      is linked into OpenSSL.
+    - Crypto optimizations such as the AES-NI instruction set 
+      available in OpenSSL are utilized by the SRTP stack.
+
+This package is currently compatible with OpenSSL 1.0.1.
+
+Installation:
+
+./configure [ options ]       # GNU autoconf script 
+make                          # or gmake if needed; use GNU make
+
+The configure script accepts the following options:
+
+   --help              provides a usage summary
+   --disable-debug     compile without the runtime debugging system
+   --disable-stdout    use stdout for error reporting
+   --enable-console    use /dev/console for error reporting
+   --with-libcryptodir specify alternative location of OpenSSL library
+
+By default, debbuging is enabled and stdout is used for debugging.
+You can use the above configure options to have the debugging output
+sent to syslog or the system console.  Alternatively, you can define
+ERR_REPORTING_FILE in include/conf.h to be any other file that can be
+opened by libSRTP, and debug messages will be sent to it.  
+
+This package has been tested on Linux (Ubuntu 12.10).  Previous
+versions have been tested on Linux and OpenBSD on both x86 and sparc
+platforms.
+
+A quick tour of this package:
+
+Makefile		targets: all, clean, ...
+README			this file
+VERSION			version number of this package
+LICENSE                 legal details (it's a BSD-like license)
+crypto/cipher/		ciphers (null, aes_icm, ...)
+crypto/hash/            crypto hashing (hmac)
+crypto/replay/		replay protection
+crypto/rng              random number generator
+crypto/test             test drivers for crypto layer
+doc/			documentation: rfcs, apis, and suchlike
+include/		include files for all code in distribution
+srtp/			secure real-time transport protocol implementation
+test/			test drivers srtp layer 
+
+
+Applications
+
+  Several test drivers and a simple and portable srtp application
+  are included in the test/ subdirectory.
+
+  test driver	function tested	
+  -------------------------------------------------------------
+  kernel_driver crypto kernel (ciphers, auth funcs, rng)
+  srtp_driver	srtp in-memory tests (does not use the network)
+  rdbx_driver	rdbx (extended replay database)
+  roc_driver	extended sequence number functions 
+  replay_driver	replay database (n.b. not used in libsrtp)
+  srtp_driver   SRTP protocol
+  dtls_srtp_driver DTLS interface into SRTP protocol
+
+  The app rtpw is a simple rtp application which reads words from
+  /usr/dict/words and then sends them out one at a time using [s]rtp.
+  Manual srtp keying uses the -k option; automated key management
+  using gdoi will be added later.
+
+usage: test/rtpw [-d <debug>]* [-k <key> [-a][-e <key size>][-t][-f]] [-s | -r] dest_ip dest_port
+or     test/rtpw -l
+where  -a use message authentication
+       -e <key size> use encryption (use 128, 192, or 256 for key size)
+       -f enable FIPS mode
+       -k <key>  sets the srtp master key
+       -s act as rtp sender
+       -r act as rtp receiver
+       -t use truncated 32 bit tag (must be used with -a and -e)
+       -l list debug modules
+       -d <debug> turn on debugging for module <debug>
+       -i specify input/output file
+
+
+An example of an SRTP session using two rtpw programs follows:
+
+set k=c1eec3717da76195bb878578790af71c4ee9f859e197a414a78d5abc7451
+
+[sh1]$ test/rtpw -s -k $k -e 128 -a 0.0.0.0 9999 
+Security services: confidentiality message authentication
+set master key/salt to C1EEC3717DA76195BB878578790AF71C/4EE9F859E197A414A78D5ABC7451
+setting SSRC to 2078917053
+sending word: A
+sending word: a
+sending word: aa
+sending word: aal
+...
+
+[sh2]$ test/rtpw -r -k $k -e 128 -a 0.0.0.0 9999 
+security services: confidentiality message authentication
+set master key/salt to C1EEC3717DA76195BB878578790AF71C/4EE9F859E197A414A78D5ABC7451
+19 octets received from SSRC 2078917053 word: A
+19 octets received from SSRC 2078917053 word: a
+20 octets received from SSRC 2078917053 word: aa
+21 octets received from SSRC 2078917053 word: aal
+...
+
+Implementation Notes
+
+  * The srtp_protect() function assumes that the buffer holding the
+    rtp packet has enough storage allocated that the authentication 
+    tag can be written to the end of that packet.  If this assumption
+    is not valid, memory corruption will ensue.  
+
+  * Automated tests for the crypto functions are provided through
+    the cipher_type_self_test() and auth_type_self_test() functions.
+    These functions should be used to test each port of this code 
+    to a new platform.
+
+  * Replay protection is contained in the crypto engine, and
+    tests for it are provided.
+
+  * This implementation provides calls to initialize, protect, and
+    unprotect RTP packets, and makes as few as possible assumptions
+    about how these functions will be called.  For example, the
+    caller is not expected to provide packets in order (though if
+    they're called more than 65k out of sequence, synchronization
+    will be lost).
+    
+  * The sequence number in the rtp packet is used as the low 16 bits
+    of the sender's local packet index. Note that RTP will start its
+    sequence number in a random place, and the SRTP layer just jumps
+    forward to that number at its first invocation.  An earlier
+    version of this library used initial sequence numbers that are
+    less than 32,768; this trick is no longer required as the
+    rdbx_estimate_index(...) function has been made smarter.
+
+  * The replay window is 128 bits in length, and is hard-coded to this
+    value for now.  
+
+
