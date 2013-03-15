@@ -131,6 +131,7 @@ main (int argc, char *argv[])
     int sock, ret;
     int fips_on = 0;
     int tt_on = 0; //truncated tag enabled
+    int gcm_on = 0;
     struct in_addr rcvr_addr;
     struct sockaddr_in name;
     struct ip_mreq mreq;
@@ -174,7 +175,7 @@ main (int argc, char *argv[])
 
     /* check args */
     while (1) {
-        c = getopt_s(argc, argv, "k:e:rsaftld:i:");
+        c = getopt_s(argc, argv, "k:e:rsagftld:i:");
         if (c == -1) {
             break;
         }
@@ -207,6 +208,10 @@ main (int argc, char *argv[])
             break;
         case 't':
             tt_on = 1;
+            break;
+        case 'g':
+            gcm_on = 1;
+	    sec_servs = sec_serv_conf;
             break;
         case 'd':
             status = crypto_kernel_set_debug_module(optarg_s, 1);
@@ -343,7 +348,7 @@ main (int argc, char *argv[])
          */
         switch (sec_servs) {
         case sec_serv_conf_and_auth:
-            if (tt_on) {
+	    if (tt_on) {
                 switch (key_size) {
                 case 128:
                     crypto_policy_set_aes_cm_128_hmac_sha1_32(&policy.rtp);
@@ -376,20 +381,26 @@ main (int argc, char *argv[])
             }
             break;
         case sec_serv_conf:
-            switch (key_size) {
-            case 128:
-                crypto_policy_set_aes_cm_128_null_auth(&policy.rtp);
-                crypto_policy_set_rtcp_default(&policy.rtcp);
-                break;
-            case 192:
-                crypto_policy_set_aes_cm_192_null_auth(&policy.rtp);
-                crypto_policy_set_rtcp_default(&policy.rtcp);
-                break;
-            case 256:
-                crypto_policy_set_aes_cm_256_null_auth(&policy.rtp);
-                crypto_policy_set_rtcp_default(&policy.rtcp);
-                break;
-            }
+	    if (gcm_on) {
+		//FIXME: for now we just do 128 bit GCM
+		crypto_policy_set_aes_gcm_128_8_auth(&policy.rtp);
+		crypto_policy_set_rtcp_default(&policy.rtcp);
+	    } else {
+		switch (key_size) {
+		case 128:
+		    crypto_policy_set_aes_cm_128_null_auth(&policy.rtp);
+		    crypto_policy_set_rtcp_default(&policy.rtcp);
+		    break;
+		case 192:
+		    crypto_policy_set_aes_cm_192_null_auth(&policy.rtp);
+		    crypto_policy_set_rtcp_default(&policy.rtcp);
+		    break;
+		case 256:
+		    crypto_policy_set_aes_cm_256_null_auth(&policy.rtp);
+		    crypto_policy_set_rtcp_default(&policy.rtcp);
+		    break;
+		}
+	    }
             break;
         case sec_serv_auth:
             crypto_policy_set_null_cipher_hmac_sha1_80(&policy.rtp);
@@ -599,6 +610,7 @@ usage (char *string)
            "or     %s -l\n"
            "where  -a use message authentication\n"
            "       -e <key size> use encryption (use 128, 192, or 256 for key size)\n"
+	   "       -g Use AES-GCM mode (overrides -e, -a and -t options)\n"
            "       -f enable FIPS mode\n"
            "       -k <key>  sets the srtp master key\n"
            "       -s act as rtp sender\n"

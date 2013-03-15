@@ -1591,6 +1591,28 @@ const srtp_policy_t null_policy = {
     NULL
 };
 
+const srtp_policy_t aes128_gcm_8_policy = {
+    { ssrc_any_outbound, 0 },  /* SSRC                         */
+    {                      /* SRTP policy                      */
+	AES_128_GCM_8,          /* cipher type                 */
+	16,                     /* cipher key length in octets */
+	NULL_AUTH,              /* authentication func type    */
+	0,                      /* auth key length in octets   */
+	8,                      /* auth tag length in octets   */
+	sec_serv_conf           /* security services flag      */
+    },
+    {                      /* SRTCP policy                     */
+	AES_128_GCM_8,          /* cipher type                 */
+	16,                     /* cipher key length in octets */
+	NULL_AUTH,              /* authentication func type    */
+	0,                      /* auth key length in octets   */
+	8,                      /* auth tag length in octets   */
+	sec_serv_conf           /* security services flag      */
+    },
+    test_key,
+    NULL
+};
+ 
 
 /*
  * an array of pointers to the policies listed above
@@ -1609,6 +1631,7 @@ policy_array[] = {
     &default_policy,
     &aes192_policy,
     &aes256_policy,
+    &aes128_gcm_8_policy,
     &null_policy,
     NULL
 };

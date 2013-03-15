@@ -82,11 +82,11 @@ typedef err_status_t (*cipher_alloc_func_t)
 
 /*
  * a cipher_init_func_t [re-]initializes a cipher_t with a given key
- * and direction (i.e., encrypt or decrypt)
+ * i.e., encrypt or decrypt)
  */
 
 typedef err_status_t (*cipher_init_func_t)
-    (void *state, const uint8_t *key, cipher_direction_t dir);
+    (void *state, const uint8_t *key);
 
 /* a cipher_dealloc_func_t de-allocates a cipher_t */
 
@@ -96,6 +96,11 @@ typedef err_status_t (*cipher_dealloc_func_t)(cipher_pointer_t cp);
 
 typedef err_status_t (*cipher_set_segment_func_t)
     (void *state, xtd_seq_num_t idx);
+
+/* a cipher_set_aad_func_t processes the AAD data for AEAD ciphers */
+typedef err_status_t (*cipher_set_aad_func_t)
+     (void *state, uint8_t *aad, unsigned int aad_len);
+
 
 /* a cipher_encrypt_func_t encrypts data in-place */
 
@@ -113,7 +118,11 @@ typedef err_status_t (*cipher_decrypt_func_t)
  */
 
 typedef err_status_t (*cipher_set_iv_func_t)
-    (cipher_pointer_t cp, void *iv);
+    (cipher_pointer_t cp, void *iv, int dir);
+
+
+typedef err_status_t (*cipher_get_tag_func_t)
+     (void *state, void *tag, unsigned int *len);
 
 /*
  * cipher_test_case_t is a (list of) key, salt, xtd_seq_num_t,
@@ -131,18 +140,22 @@ typedef struct cipher_test_case_t {
     uint8_t *plaintext;                        /* plaintext                */
     int ciphertext_length_octets;              /* octets in plaintext      */
     uint8_t *ciphertext;                       /* ciphertext               */
+    int aad_length_octets;                     /* octets in AAD            */ 
+    uint8_t *aad;                              /* AAD                      */
     struct cipher_test_case_t *next_test_case; /* pointer to next testcase */
 } cipher_test_case_t;
 
 /* cipher_type_t defines the 'metadata' for a particular cipher type */
 
 typedef struct cipher_type_t {
-    cipher_alloc_func_t alloc;
-    cipher_dealloc_func_t dealloc;
-    cipher_init_func_t init;
-    cipher_encrypt_func_t encrypt;
-    cipher_encrypt_func_t decrypt;
-    cipher_set_iv_func_t set_iv;
+    cipher_alloc_func_t        alloc;
+    cipher_dealloc_func_t      dealloc;
+    cipher_init_func_t         init;
+    cipher_set_aad_func_t      set_aad;
+    cipher_encrypt_func_t      encrypt;
+    cipher_encrypt_func_t      decrypt;
+    cipher_set_iv_func_t       set_iv;
+    cipher_get_tag_func_t      get_tag;
     char                       *description;
     int ref_count;
     cipher_test_case_t         *test_data;
@@ -167,17 +180,25 @@ typedef struct cipher_t {
 
 #define cipher_dealloc(c) (((c)->type)->dealloc(c))
 
-#define cipher_init(c, k, dir) (((c)->type)->init(((c)->state), (k), (dir)))
+#define cipher_init(c, k) (((c)->type)->init(((c)->state), (k)))
 
 #define cipher_encrypt(c, buf, len) \
     (((c)->type)->encrypt(((cipher_pointer_t)(c)->state), (buf), (len)))
 
+#define cipher_get_tag(c, buf, len) \
+        (((c)->type)->get_tag(((c)->state), (buf), (len)))
+
 #define cipher_decrypt(c, buf, len) \
     (((c)->type)->decrypt(((cipher_pointer_t)(c)->state), (buf), (len)))
 
-#define cipher_set_iv(c, n)                           \
-    ((c) ? (((c)->type)->set_iv(((cipher_pointer_t)(c)->state), (n))) :   \
+#define cipher_set_iv(c, n, d)                        \
+  ((c) ? (((c)->type)->set_iv(((c)->state), (n), (d))) :   \
      err_status_no_such_op)
+
+#define cipher_set_aad(c, a, l)                       \
+  (((c) && (((c)->type)->set_aad)) ?                  \
+  (((c)->type)->set_aad(((c)->state), (a), (l))) :    \
+                                err_status_no_such_op)  
 
 err_status_t
 cipher_output(cipher_t *c, uint8_t *buffer, int num_octets_to_output);

@@ -119,6 +119,7 @@ extern cipher_type_t null_cipher;
 extern cipher_type_t aes_icm_openssl;
 extern cipher_type_t aes_icm_192_openssl;
 extern cipher_type_t aes_icm_256_openssl;
+extern cipher_type_t aes_gcm_128_8_openssl;
 
 int
 main (int argc, char *argv[])
@@ -185,6 +186,10 @@ main (int argc, char *argv[])
         for (num_cipher = 1; num_cipher < max_num_cipher; num_cipher *= 8) {
             cipher_driver_test_array_throughput(&aes_icm_256_openssl, 46, num_cipher);
         }
+
+	for (num_cipher=1; num_cipher < max_num_cipher; num_cipher *=8) {
+	    cipher_driver_test_array_throughput(&aes_gcm_128_8_openssl, 16, num_cipher); 
+	}
     }
 
     if (do_validation) {
@@ -192,13 +197,14 @@ main (int argc, char *argv[])
         cipher_driver_self_test(&aes_icm_openssl);
         cipher_driver_self_test(&aes_icm_192_openssl);
         cipher_driver_self_test(&aes_icm_256_openssl);
+        cipher_driver_self_test(&aes_gcm_128_8_openssl);
     }
 
     /* do timing and/or buffer_test on null_cipher */
     status = cipher_type_alloc(&null_cipher, &c, 0);
     check_status(status);
 
-    status = cipher_init(c, NULL, direction_encrypt);
+    status = cipher_init(c, NULL);
     check_status(status);
 
     if (do_timing_test) {
@@ -218,7 +224,7 @@ main (int argc, char *argv[])
         fprintf(stderr, "error: can't allocate cipher\n");
         exit(status);
     }
-    status = cipher_init(c, test_key, direction_encrypt);
+    status = cipher_init(c, test_key);
     check_status(status);
     if (do_timing_test) {
         cipher_driver_test_throughput(c);
@@ -237,7 +243,7 @@ main (int argc, char *argv[])
         fprintf(stderr, "error: can't allocate cipher\n");
         exit(status);
     }
-    status = cipher_init(c, test_key, direction_encrypt);
+    status = cipher_init(c, test_key);
     check_status(status);
     if (do_timing_test) {
         cipher_driver_test_throughput(c);
@@ -256,7 +262,7 @@ main (int argc, char *argv[])
         fprintf(stderr, "error: can't allocate cipher\n");
         exit(status);
     }
-    status = cipher_init(c, test_key, direction_encrypt);
+    status = cipher_init(c, test_key);
     check_status(status);
     if (do_timing_test) {
         cipher_driver_test_throughput(c);
@@ -269,6 +275,25 @@ main (int argc, char *argv[])
     status = cipher_dealloc(c);
     check_status(status);
 
+    /* run the throughput test on the aes_gcm_128_8_openssl cipher */
+    status = cipher_type_alloc(&aes_gcm_128_8_openssl, &c, 16);  
+    if (status) {
+	fprintf(stderr, "error: can't allocate cipher\n");
+	exit(status);
+    }
+    status = cipher_init(c, test_key);
+    check_status(status);
+    if (do_timing_test) {
+	cipher_driver_test_throughput(c);
+    }
+    
+    if (do_validation) {
+	status = cipher_driver_test_buffering(c);
+	check_status(status);
+    }
+    status = cipher_dealloc(c);
+    check_status(status);
+    
     return 0;
 }
 
@@ -334,7 +359,7 @@ cipher_driver_test_buffering (cipher_t *c)
         }
 
         /* initialize cipher  */
-        status = cipher_set_iv(c, idx);
+        status = cipher_set_iv(c, idx, direction_encrypt);
         if (status) {
             return status;
         }
@@ -346,7 +371,7 @@ cipher_driver_test_buffering (cipher_t *c)
         }
 
         /* re-initialize cipher */
-        status = cipher_set_iv(c, idx);
+        status = cipher_set_iv(c, idx, direction_encrypt);
         if (status) {
             return status;
         }
@@ -443,7 +468,7 @@ cipher_array_alloc_init (cipher_t ***ca, int num_ciphers,
         for (j = 0; j < klen; j++) {
             key[j] = (uint8_t)rand();
         }
-        status = cipher_init(*cipher_array, key, direction_encrypt);
+        status = cipher_init(*cipher_array, key);
         if (status) {
             return status;
         }
@@ -511,7 +536,7 @@ cipher_array_bits_per_second (cipher_t *cipher_array[], int num_cipher,
         cipher_index = (*((uint32_t*)enc_buf)) % num_cipher;
 
         /* encrypt buffer with cipher */
-        cipher_set_iv(cipher_array[cipher_index], &nonce);
+        cipher_set_iv(cipher_array[cipher_index], &nonce, direction_encrypt);
         cipher_encrypt(cipher_array[cipher_index], enc_buf, &octets_in_buffer);
     }
     timer = clock() - timer;

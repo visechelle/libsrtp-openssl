@@ -121,6 +121,14 @@
  */
 #define AES_256_ICM        5
 
+/** 
+ * @brief AES-128_GCM_8 Galois Counter Mode (AES GCM)             
+ *
+ * AES-128 GCM is the variant of galois counter mode that is used by 
+ * Secure RTP.  This cipher uses a 16-octet key and 8-octet auth tag.
+ */
+#define AES_128_GCM_8      6            
+
 /**
  * @brief Strongest available cipher.
  *

@@ -227,6 +227,12 @@ srtp_stream_dealloc (srtp_t session, srtp_stream_ctx_t *stream)
 	return status;
     }
 
+    /*
+     * zeroize the salt value
+     */
+    memset(stream->salt, 0, 12);
+    memset(stream->c_salt, 0, 12);
+
     /* deallocate srtp stream context */
     crypto_free(stream);
 
@@ -288,6 +294,10 @@ srtp_stream_clone (const srtp_stream_ctx_t *stream_template,
     str->rtp_services  = stream_template->rtp_services;
     str->rtcp_services = stream_template->rtcp_services;
 
+    /* Copy the salt values */
+    memcpy(str->salt, stream_template->salt, 12);
+    memcpy(str->c_salt, stream_template->c_salt, 12);
+
     /* defensive coding */
     str->next = NULL;
 
@@ -331,7 +341,7 @@ static err_status_t srtp_kdf_init (cipher_t **c, cipher_type_id_t cipher_id,
         return (status);
     }
 
-    status = cipher_init(*c, key, direction_encrypt);
+    status = cipher_init(*c, key);
     if (status) {
 	cipher_dealloc(*c);
 	return status;
@@ -353,7 +363,7 @@ static err_status_t srtp_kdf_generate (cipher_t *c, srtp_prf_label label,
     /* set eigth octet of nonce to <label>, set the rest of it to zero */
     v128_set_to_zero(&nonce);
     nonce.v8[7] = label;
-    cipher_set_iv(c, &nonce);
+    cipher_set_iv(c, &nonce, direction_encrypt);
 
     /* generate keystream output */
     octet_string_set_to_zero(key, len);
@@ -375,7 +385,7 @@ static err_status_t srtp_kdf_generate2 (cipher_t *c, srtp_prf_label label,
     /* set eigth octet of nonce to <label>, set the rest of it to zero */
     v128_set_to_zero(&nonce);
     nonce.v8[7] = label;
-    cipher_set_iv(c, &nonce);
+    cipher_set_iv(c, &nonce, direction_encrypt);
 
     /* generate keystream output */
     octet_string_set_to_zero(key, length);
@@ -472,6 +482,7 @@ srtp_stream_init (srtp_stream_ctx_t *srtp,
         stat = srtp_kdf_init(&kdf, AES_192_ICM, key, AES_192_KEYSIZE_WSALT);
         break;
     case AES_128_ICM:
+    case AES_128_GCM_8:
         stat = srtp_kdf_init(&kdf, AES_128_ICM, key, AES_128_KEYSIZE_WSALT);
         break;
     default:
@@ -492,6 +503,7 @@ srtp_stream_init (srtp_stream_ctx_t *srtp,
         srtp_kdf_generate2(kdf, label_rtp_encryption, tmp_key, AES_192_KEYSIZE);
         break;
     case AES_128_ICM:
+    case AES_128_GCM_8:
         srtp_kdf_generate(kdf, label_rtp_encryption, tmp_key, AES_128_KEYSIZE);
         break;
     default:
@@ -507,6 +519,14 @@ srtp_stream_init (srtp_stream_ctx_t *srtp,
         srtp_kdf_generate(kdf, label_rtp_salt, tmp_key + (p->rtp.cipher_key_len - SALT_SIZE),
                           SALT_SIZE);
         break;
+    case AES_128_GCM_8:
+	/*
+	 * Suite B uses a 12 byte salt which must be saved on the 
+	 * context for future use.  It's used when encrypting
+	 * packets.
+	 */
+        srtp_kdf_generate(kdf, label_rtp_salt, srtp->salt, 12);
+        break;
     default:
         /* nothing to do for the NULL cipher */
         break;
@@ -515,7 +535,7 @@ srtp_stream_init (srtp_stream_ctx_t *srtp,
                 octet_string_hex_string(tmp_key, cipher_get_key_length(srtp->rtp_cipher)));
 
     /* initialize cipher */
-    stat = cipher_init(srtp->rtp_cipher, tmp_key, direction_any);
+    stat = cipher_init(srtp->rtp_cipher, tmp_key);
     if (stat) {
         /* zeroize temp buffer */
         octet_string_set_to_zero(tmp_key, MAX_SRTP_KEY_LEN);
@@ -560,6 +580,7 @@ srtp_stream_init (srtp_stream_ctx_t *srtp,
         srtp_kdf_generate2(kdf, label_rtcp_encryption, tmp_key, AES_192_KEYSIZE);
         break;
     case AES_128_ICM:
+    case AES_128_GCM_8:
         srtp_kdf_generate(kdf, label_rtcp_encryption, tmp_key, AES_128_KEYSIZE);
         break;
     default:
@@ -575,6 +596,14 @@ srtp_stream_init (srtp_stream_ctx_t *srtp,
         srtp_kdf_generate(kdf, label_rtcp_salt, tmp_key + (p->rtp.cipher_key_len - SALT_SIZE),
                           SALT_SIZE);
         break;
+    case AES_128_GCM_8:
+	/*
+	 * Suite B uses a 12 byte salt which must be saved on the 
+	 * context for future use.  It's used when encrypting
+	 * packets.
+	 */
+        srtp_kdf_generate(kdf, label_rtcp_salt, srtp->c_salt, 12);
+        break;
     default:
         /* nothing to do for the NULL cipher */
         break;
@@ -584,7 +613,7 @@ srtp_stream_init (srtp_stream_ctx_t *srtp,
                                         cipher_get_key_length(srtp->rtcp_cipher)));
 
     /* initialize cipher */
-    stat = cipher_init(srtp->rtcp_cipher, tmp_key, direction_any);
+    stat = cipher_init(srtp->rtcp_cipher, tmp_key);
     if (stat) {
         /* zeroize temp buffer */
         octet_string_set_to_zero(tmp_key, MAX_SRTP_KEY_LEN);
@@ -673,6 +702,79 @@ srtp_install_event_handler (srtp_event_handler_func_t func)
     return err_status_ok;
 }
 
+
+/*
+ * Suite B uses a new IV formation method.  This function implements
+ * section 9.1 from draft-ietf-avtcore-srtp-aes-gcm-03.txt.  The
+ * calculation is defined as, where (+) is the xor operation:
+ *
+ *
+ *              0  0  0  0  0  0  0  0  0  0  1  1
+ *              0  1  2  3  4  5  6  7  8  9  0  1
+ *            +--+--+--+--+--+--+--+--+--+--+--+--+
+ *            |00|00|    SSRC   |     ROC   | SEQ |---+
+ *            +--+--+--+--+--+--+--+--+--+--+--+--+   |
+ *                                                    |
+ *            +--+--+--+--+--+--+--+--+--+--+--+--+   |
+ *            |         Encryption Salt           |->(+)
+ *            +--+--+--+--+--+--+--+--+--+--+--+--+   |
+ *                                                    |
+ *            +--+--+--+--+--+--+--+--+--+--+--+--+   |
+ *            |       Initialization Vector       |<--+
+ *            +--+--+--+--+--+--+--+--+--+--+--+--+*
+ *
+ * Input:  *stream - pointer to SRTP stream context, used to retrieve
+ *                   the SALT 
+ *         *iv     - Pointer to recieve the calculated IV
+ *         *seq    - The ROC and SEQ value to use for the
+ *                   IV calculation.
+ *         *hdr    - The RTP header, used to get the SSRC value
+ *
+ */
+static void srtp_calc_suiteb_iv(srtp_stream_ctx_t *stream, v128_t *iv, xtd_seq_num_t *seq, srtp_hdr_t *hdr)
+{
+    v128_t	in;
+    v128_t	salt;
+    v128_t      roc_seq;
+
+    memset(&in, 0, sizeof(v128_t));
+    memset(&salt, 0, sizeof(v128_t));
+
+    /*
+     * Convert seq# to v128_t so we can manipulate the byte order
+     */
+    v128_copy_octet_string(&roc_seq, (const uint8_t *)seq);
+    debug_print(mod_srtp, "GCM/CCM ROC/SEQ = %s\n", v128_hex_string(&roc_seq));
+
+    /*
+     * Now move ROC and SEQ into input array in the
+     * proper order
+     */
+    in.v8[11] = roc_seq.v8[0];
+    in.v8[10] = roc_seq.v8[1];
+    in.v8[9] = roc_seq.v8[2];
+    in.v8[8] = roc_seq.v8[3];
+    in.v8[7] = roc_seq.v8[4];
+    in.v8[6] = roc_seq.v8[5];
+
+    /*
+     * Copy in the RTP SSRC value
+     */
+    memcpy(&in.v8[2], &hdr->ssrc, 4);
+    debug_print(mod_srtp, "Pre-salted RTP IV = %s\n", v128_hex_string(&in));
+
+    /*
+     * Get the SALT value from the context
+     */
+    memcpy(salt.v8, stream->salt, 12);
+    debug_print(mod_srtp, "RTP SALT = %s\n", v128_hex_string(&salt));
+
+    /*
+     * Finally, apply tyhe SALT to the input
+     */
+    v128_xor(iv, &in, &salt);
+}
+
 err_status_t
 srtp_protect (srtp_ctx_t *ctx, void *rtp_hdr, int *pkt_octet_len)
 {
@@ -684,9 +786,10 @@ srtp_protect (srtp_ctx_t *ctx, void *rtp_hdr, int *pkt_octet_len)
     int delta;                  /* delta of local pkt idx and that in hdr */
     uint8_t *auth_tag = NULL;   /* location of auth_tag within packet     */
     err_status_t status;
-    int tag_len;
+    unsigned int tag_len;
     srtp_stream_ctx_t *stream;
     int prefix_len;
+    v128_t iv;
 
     debug_print(mod_srtp, "function srtp_protect", NULL);
 
@@ -822,10 +925,9 @@ srtp_protect (srtp_ctx_t *ctx, void *rtp_hdr, int *pkt_octet_len)
     /*
      * if we're using rindael counter mode, set nonce and seq
      */
-    if (stream->rtcp_cipher->algorithm == AES_128_ICM ||
-        stream->rtcp_cipher->algorithm == AES_192_ICM ||
-        stream->rtcp_cipher->algorithm == AES_256_ICM) {
-        v128_t iv;
+    if (stream->rtp_cipher->algorithm == AES_128_ICM ||
+        stream->rtp_cipher->algorithm == AES_192_ICM ||
+        stream->rtp_cipher->algorithm == AES_256_ICM) {
 
         iv.v32[0] = 0;
         iv.v32[1] = hdr->ssrc;
@@ -835,11 +937,12 @@ srtp_protect (srtp_ctx_t *ctx, void *rtp_hdr, int *pkt_octet_len)
 #else
         iv.v64[1] = be64_to_cpu(est << 16);
 #endif
-        status = cipher_set_iv(stream->rtp_cipher, &iv);
-
+    } else if (stream->rtp_cipher->algorithm == AES_128_GCM_8) {
+	/*
+	 * Suite B uses a new IV formation method
+	 */
+	srtp_calc_suiteb_iv(stream, &iv, &est, hdr);
     } else {
-        v128_t iv;
-
         /* otherwise, set the index to est */
 #ifdef NO_64BIT_MATH
         iv.v32[0] = 0;
@@ -848,8 +951,8 @@ srtp_protect (srtp_ctx_t *ctx, void *rtp_hdr, int *pkt_octet_len)
         iv.v64[0] = 0;
 #endif
         iv.v64[1] = be64_to_cpu(est);
-        status = cipher_set_iv(stream->rtp_cipher, &iv);
     }
+    status = cipher_set_iv(stream->rtp_cipher, &iv, direction_encrypt);
     if (status) {
         return err_status_cipher_fail;
     }
@@ -880,6 +983,19 @@ srtp_protect (srtp_ctx_t *ctx, void *rtp_hdr, int *pkt_octet_len)
         }
     }
 
+    /*
+     * If GCM mode and encryption is enabled, set the AAD
+     */
+    if ((stream->rtp_cipher->algorithm == AES_128_GCM_8) && 
+	(stream->rtp_services & sec_serv_conf)) {
+	unsigned int aad_len;
+	aad_len = (uint8_t *)enc_start - (uint8_t *)hdr;
+	status = cipher_set_aad(stream->rtp_cipher, (uint8_t*)hdr, aad_len);
+        if (status) {
+            return ( err_status_cipher_fail);
+        }
+    }
+
     /* if we're encrypting, exor keystream into the message */
     if (enc_start) {
         status = cipher_encrypt(stream->rtp_cipher,
@@ -887,6 +1003,19 @@ srtp_protect (srtp_ctx_t *ctx, void *rtp_hdr, int *pkt_octet_len)
         if (status) {
             return err_status_cipher_fail;
         }
+
+	/*
+	 * If we're doing GCM, we need to get the tag
+	 * and append that to the output
+	 */
+        if (stream->rtp_cipher->algorithm == AES_128_GCM_8) {  
+	    status = cipher_get_tag(stream->rtp_cipher, 
+		    (uint8_t*)enc_start+enc_octet_len, &tag_len);
+	    if (status) {
+		return ( err_status_cipher_fail);
+	    }
+	    enc_octet_len += tag_len;
+	}
     }
 
     /*
@@ -919,7 +1048,7 @@ srtp_protect (srtp_ctx_t *ctx, void *rtp_hdr, int *pkt_octet_len)
 
     }
 
-    if (auth_tag) {
+    if (auth_tag || (stream->rtp_cipher->algorithm == AES_128_GCM_8)) {
 
         /* increase the packet length by the length of the auth tag */
         *pkt_octet_len += tag_len;
@@ -1025,7 +1154,11 @@ srtp_unprotect (srtp_ctx_t *ctx, void *srtp_hdr, int *pkt_octet_len)
 #else
         iv.v64[1] = be64_to_cpu(est << 16);
 #endif
-        status = cipher_set_iv(stream->rtp_cipher, &iv);
+    } else if (stream->rtp_cipher->algorithm == AES_128_GCM_8) {  
+	/*
+	 * SuiteB uses a new IV formation method 
+	 */
+	srtp_calc_suiteb_iv(stream, &iv, &est, hdr);
     } else {
 
         /* no particular format - set the iv to the pakcet index */
@@ -1036,8 +1169,8 @@ srtp_unprotect (srtp_ctx_t *ctx, void *srtp_hdr, int *pkt_octet_len)
         iv.v64[0] = 0;
 #endif
         iv.v64[1] = be64_to_cpu(est);
-        status = cipher_set_iv(stream->rtp_cipher, &iv);
     }
+    status = cipher_set_iv(stream->rtp_cipher, &iv, direction_decrypt);
     if (status) {
         return err_status_cipher_fail;
     }
@@ -1065,8 +1198,14 @@ srtp_unprotect (srtp_ctx_t *ctx, void *srtp_hdr, int *pkt_octet_len)
             srtp_hdr_xtnd_t *xtn_hdr = (srtp_hdr_xtnd_t*)enc_start;
             enc_start += (ntohs(xtn_hdr->length) + 1);
         }
-        enc_octet_len = (unsigned int)(*pkt_octet_len - tag_len
-                                       - ((enc_start - (uint32_t*)hdr) << 2));
+        if (stream->rtp_cipher->algorithm == AES_128_GCM_8) {  
+            /*
+             * We pass the tag down to the cipher when doing GCM mode 
+             */
+            enc_octet_len = *pkt_octet_len - ((enc_start - (uint32_t *)hdr) << 2);
+        } else {
+            enc_octet_len = *pkt_octet_len - tag_len - ((enc_start - (uint32_t *)hdr) << 2);
+        }
     } else {
         enc_start = NULL;
     }
@@ -1150,6 +1289,19 @@ srtp_unprotect (srtp_ctx_t *ctx, void *srtp_hdr, int *pkt_octet_len)
         return err_status_key_expired;
     default:
         break;
+    }
+
+    /*
+     * If GCM mode and encryption is enabled, set the AAD
+     */
+    if ((stream->rtp_cipher->algorithm == AES_128_GCM_8) && 
+	(stream->rtp_services & sec_serv_conf)) {
+	unsigned int aad_len;
+	aad_len = (uint8_t *)enc_start - (uint8_t *)hdr;
+	status = cipher_set_aad(stream->rtp_cipher, (uint8_t*)hdr, aad_len);
+        if (status) {
+            return ( err_status_cipher_fail);
+        }
     }
 
     /* if we're decrypting, add keystream into ciphertext */
@@ -1685,8 +1837,81 @@ crypto_policy_set_aes_cm_256_null_auth (crypto_policy_t *p)
 }
 
 /*
- * secure rtcp functions
+ * AES-128 GCM mode with 8 octet auth tag. 
  */
+void
+crypto_policy_set_aes_gcm_128_8_auth(crypto_policy_t *p) {
+  p->cipher_type     = AES_128_GCM_8;           
+  p->cipher_key_len  = AES_128_KEYSIZE; 
+  p->auth_type       = NULL_AUTH;             
+  p->auth_key_len    = 0; 
+  p->auth_tag_len    = 8;   /* 8 octet tag length */
+  p->sec_serv        = sec_serv_conf;
+}
+
+
+
+/****************************************************************************
+ ****************************************************************************
+ *
+ * secure rtcp functions below this point
+ *
+ ****************************************************************************
+ ***************************************************************************/
+
+/*
+ * Suite B uses a new IV formation method.  This function implements
+ * section 10.1 from draft-ietf-avtcore-srtp-aes-gcm-03.txt.  The
+ * calculation is defined as, where (+) is the xor operation:
+ *
+ *                0  1  2  3  4  5  6  7  8  9 10 11
+ *               +--+--+--+--+--+--+--+--+--+--+--+--+
+ *               |00|00|    SSRC   |00|00|0+SRTCP Idx|---+
+ *               +--+--+--+--+--+--+--+--+--+--+--+--+   |
+ *                                                       |
+ *               +--+--+--+--+--+--+--+--+--+--+--+--+   |
+ *               |         Encryption Salt           |->(+)
+ *               +--+--+--+--+--+--+--+--+--+--+--+--+   |
+ *                                                       |
+ *               +--+--+--+--+--+--+--+--+--+--+--+--+   |
+ *               |       Initialization Vector       |<--+
+ *               +--+--+--+--+--+--+--+--+--+--+--+--+*
+ *
+ * Input:  *stream - pointer to SRTP stream context, used to retrieve
+ *                   the SALT 
+ *         *iv     - Pointer to recieve the calculated IV
+ *         seq_num - The SEQ value to use for the IV calculation.
+ *         *hdr    - The RTP header, used to get the SSRC value
+ *
+ */
+static void srtp_calc_suiteb_iv_srtcp(srtp_stream_ctx_t *stream, v128_t *iv, 
+	                              uint32_t seq_num, srtcp_hdr_t *hdr)
+{
+    v128_t	in;
+    v128_t	salt;
+
+    memset(&in, 0, sizeof(v128_t));
+    memset(&salt, 0, sizeof(v128_t));
+
+    in.v16[0] = 0;
+    memcpy(&in.v16[1], &hdr->ssrc, 4); /* still in network order! */
+    in.v16[3] = 0;
+    in.v32[2] = 0x7FFFFFFF & htonl(seq_num); /* bit 32 is suppose to be zero */
+
+    debug_print(mod_srtp, "Pre-salted RTCP IV = %s\n", v128_hex_string(&in));
+
+    /*
+     * Get the SALT value from the context
+     */
+    memcpy(salt.v8, stream->c_salt, 12);
+    debug_print(mod_srtp, "RTCP SALT = %s\n", v128_hex_string(&salt));
+
+    /*
+     * Finally, apply tyhe SALT to the input
+     */
+    v128_xor(iv, &in, &salt);
+}
+
 
 err_status_t
 srtp_protect_rtcp (srtp_t ctx, void *rtcp_hdr, int *pkt_octet_len)
@@ -1698,10 +1923,11 @@ srtp_protect_rtcp (srtp_t ctx, void *rtcp_hdr, int *pkt_octet_len)
     unsigned enc_octet_len = 0; /* number of octets in encrypted portion */
     uint8_t *auth_tag = NULL;   /* location of auth_tag within packet     */
     err_status_t status;
-    int tag_len;
+    unsigned int tag_len;
     srtp_stream_ctx_t *stream;
     int prefix_len;
     uint32_t seq_num;
+    v128_t iv;
 
     /* we assume the hdr is 32-bit aligned to start */
     /*
@@ -1764,7 +1990,11 @@ srtp_protect_rtcp (srtp_t ctx, void *rtcp_hdr, int *pkt_octet_len)
            RTCP report in the compound packet! */
     /* NOTE: trailer is 32-bit aligned because RTCP 'packets' are always
            multiples of 32-bits (RFC 3550 6.1) */
-    trailer = (uint32_t*)((char*)enc_start + enc_octet_len);
+    if (stream->rtcp_cipher->algorithm == AES_128_GCM_8) { 
+	trailer = (uint32_t*)((char*)enc_start + enc_octet_len + tag_len);
+    } else {
+	trailer = (uint32_t*)((char*)enc_start + enc_octet_len);
+    }
 
     if (stream->rtcp_services & sec_serv_conf) {
         *trailer = htonl(SRTCP_E_BIT); /* set encrypt bit */
@@ -1801,24 +2031,20 @@ srtp_protect_rtcp (srtp_t ctx, void *rtcp_hdr, int *pkt_octet_len)
     if (stream->rtcp_cipher->algorithm == AES_128_ICM ||
         stream->rtcp_cipher->algorithm == AES_192_ICM ||
         stream->rtcp_cipher->algorithm == AES_256_ICM) {
-        v128_t iv;
-
         iv.v32[0] = 0;
         iv.v32[1] = hdr->ssrc; /* still in network order! */
         iv.v32[2] = htonl(seq_num >> 16);
         iv.v32[3] = htonl(seq_num << 16);
-        status = cipher_set_iv(stream->rtcp_cipher, &iv);
-
+    } else if (stream->rtcp_cipher->algorithm == AES_128_GCM_8) { 
+	srtp_calc_suiteb_iv_srtcp(stream, &iv, seq_num, hdr);
     } else {
-        v128_t iv;
-
         /* otherwise, just set the index to seq_num */
         iv.v32[0] = 0;
         iv.v32[1] = 0;
         iv.v32[2] = 0;
         iv.v32[3] = htonl(seq_num);
-        status = cipher_set_iv(stream->rtcp_cipher, &iv);
     }
+    status = cipher_set_iv(stream->rtcp_cipher, &iv, direction_encrypt);
     if (status) {
         return err_status_cipher_fail;
     }
@@ -1829,7 +2055,7 @@ srtp_protect_rtcp (srtp_t ctx, void *rtcp_hdr, int *pkt_octet_len)
      */
 
     /* if auth_start is non-null, then put keystream into tag  */
-    if (auth_start) {
+    if (auth_start && (stream->rtcp_cipher->algorithm != AES_128_GCM_8)) {
 
         /* put keystream prefix into auth_tag */
         prefix_len = auth_get_prefix_length(stream->rtcp_auth);
@@ -1843,6 +2069,23 @@ srtp_protect_rtcp (srtp_t ctx, void *rtcp_hdr, int *pkt_octet_len)
         }
     }
 
+    /*
+     * If GCM mode, set the AAD
+     */
+    if (auth_start && (stream->rtcp_cipher->algorithm == AES_128_GCM_8)) {
+	uint32_t tseq;
+	status = cipher_set_aad(stream->rtcp_cipher, (uint8_t*)hdr, octets_in_rtcp_header);
+        if (status) {
+            return ( err_status_cipher_fail);
+        }
+	/* put the idx# into network byte order */
+        tseq = htonl(*trailer);
+	status = cipher_set_aad(stream->rtcp_cipher, (uint8_t*)&tseq, sizeof(srtcp_trailer_t));
+        if (status) {
+            return ( err_status_cipher_fail);
+        }
+    }
+ 
     /* if we're encrypting, exor keystream into the message */
     if (enc_start) {
         status = cipher_encrypt(stream->rtcp_cipher,
@@ -1850,23 +2093,36 @@ srtp_protect_rtcp (srtp_t ctx, void *rtcp_hdr, int *pkt_octet_len)
         if (status) {
             return err_status_cipher_fail;
         }
+	/*
+	 * If we're doing GCM, we need to get the tag
+	 * and append that to the output
+	 */
+        if (stream->rtcp_cipher->algorithm == AES_128_GCM_8) {  
+	    status = cipher_get_tag(stream->rtcp_cipher, 
+		    (uint8_t*)enc_start+enc_octet_len, &tag_len);
+	    if (status) {
+		return ( err_status_cipher_fail);
+	    }
+	    enc_octet_len += tag_len;
+	}
     }
 
-    /* initialize auth func context */
-    auth_start(stream->rtcp_auth);
-
-    /*
-     * run auth func over packet (including trailer), and write the
-     * result at auth_tag
-     */
-    status = auth_compute(stream->rtcp_auth,
-                          (uint8_t*)auth_start,
-                          (*pkt_octet_len) + sizeof(srtcp_trailer_t),
-                          auth_tag);
-    debug_print(mod_srtp, "srtcp auth tag:    %s",
-                octet_string_hex_string(auth_tag, tag_len));
-    if (status) {
-        return err_status_auth_fail;
+    if (auth_start && (stream->rtcp_cipher->algorithm != AES_128_GCM_8)) {
+	/* initialize auth func context */
+	auth_start(stream->rtcp_auth);
+	/*
+	 * run auth func over packet (including trailer), and write the
+	 * result at auth_tag
+	 */
+	status = auth_compute(stream->rtcp_auth,
+			    (uint8_t*)auth_start,
+			    (*pkt_octet_len) + sizeof(srtcp_trailer_t),
+			    auth_tag);
+	debug_print(mod_srtp, "srtcp auth tag:    %s",
+		    octet_string_hex_string(auth_tag, tag_len));
+	if (status) {
+	    return ( err_status_auth_fail);
+	}
     }
 
     /* increase the packet length by the length of the auth tag and seq_num*/
@@ -1891,6 +2147,7 @@ srtp_unprotect_rtcp (srtp_t ctx, void *srtcp_hdr, int *pkt_octet_len)
     srtp_stream_ctx_t *stream;
     int prefix_len;
     uint32_t seq_num;
+    v128_t iv;
 
     /* we assume the hdr is 32-bit aligned to start */
     /*
@@ -1923,8 +2180,7 @@ srtp_unprotect_rtcp (srtp_t ctx, void *srtcp_hdr, int *pkt_octet_len)
     /*
      * set encryption start, encryption length, and trailer
      */
-    enc_octet_len = *pkt_octet_len -
-                    (octets_in_rtcp_header + tag_len + sizeof(srtcp_trailer_t));
+
     /* index & E (encryption) bit follow normal data.  hdr->len
            is the number of words (32-bit) in the normal packet minus 1 */
     /* This should point trailer to the word past the end of the
@@ -1934,8 +2190,22 @@ srtp_unprotect_rtcp (srtp_t ctx, void *srtcp_hdr, int *pkt_octet_len)
      * NOTE: trailer is 32-bit aligned because RTCP 'packets' are always
      *	 multiples of 32-bits (RFC 3550 6.1)
      */
-    trailer = (uint32_t*)((char*)hdr +
+    if (stream->rtcp_cipher->algorithm == AES_128_GCM_8) {  
+	trailer = (uint32_t*)((char*)hdr +
+                          *pkt_octet_len - sizeof(srtcp_trailer_t));
+        /*
+         * We pass the tag down to the cipher when doing GCM mode 
+         */
+	enc_octet_len = *pkt_octet_len - 
+			(octets_in_rtcp_header + sizeof(srtcp_trailer_t));
+	auth_tag = (uint8_t*)hdr + *pkt_octet_len - tag_len - sizeof(srtcp_trailer_t);
+    } else {
+	trailer = (uint32_t*)((char*)hdr +
                           *pkt_octet_len - (tag_len + sizeof(srtcp_trailer_t)));
+	enc_octet_len = *pkt_octet_len -
+			(octets_in_rtcp_header + tag_len + sizeof(srtcp_trailer_t));
+	auth_tag = (uint8_t*)hdr + *pkt_octet_len - tag_len;
+    }
     if (*((unsigned char*)trailer) & SRTCP_E_BYTE_BIT) {
         enc_start = (uint32_t*)hdr + uint32s_in_rtcp_header;
     } else {
@@ -1948,7 +2218,6 @@ srtp_unprotect_rtcp (srtp_t ctx, void *srtcp_hdr, int *pkt_octet_len)
      * (note that srtcp *always* uses authentication, unlike srtp)
      */
     auth_start = (uint32_t*)hdr;
-    auth_tag = (uint8_t*)hdr + *pkt_octet_len - tag_len;
 
     /*
      * check the sequence number for replays
@@ -1967,60 +2236,71 @@ srtp_unprotect_rtcp (srtp_t ctx, void *srtcp_hdr, int *pkt_octet_len)
     if (stream->rtcp_cipher->algorithm == AES_128_ICM ||
         stream->rtcp_cipher->algorithm == AES_192_ICM ||
         stream->rtcp_cipher->algorithm == AES_256_ICM) {
-        v128_t iv;
-
         iv.v32[0] = 0;
         iv.v32[1] = hdr->ssrc; /* still in network order! */
         iv.v32[2] = htonl(seq_num >> 16);
         iv.v32[3] = htonl(seq_num << 16);
-        status = cipher_set_iv(stream->rtcp_cipher, &iv);
-
+    } else if (stream->rtcp_cipher->algorithm == AES_128_GCM_8) { 
+	srtp_calc_suiteb_iv_srtcp(stream, &iv, seq_num, hdr);
     } else {
-        v128_t iv;
-
         /* otherwise, just set the index to seq_num */
         iv.v32[0] = 0;
         iv.v32[1] = 0;
         iv.v32[2] = 0;
         iv.v32[3] = htonl(seq_num);
-        status = cipher_set_iv(stream->rtcp_cipher, &iv);
-
     }
+    status = cipher_set_iv(stream->rtcp_cipher, &iv, direction_decrypt);
     if (status) {
         return err_status_cipher_fail;
     }
 
-    /* initialize auth func context */
-    auth_start(stream->rtcp_auth);
+    if (stream->rtcp_cipher->algorithm != AES_128_GCM_8) {
+	/* initialize auth func context */
+	auth_start(stream->rtcp_auth);
+	/* run auth func over packet, put result into tmp_tag */
+	status = auth_compute(stream->rtcp_auth, (uint8_t*)auth_start,
+			      *pkt_octet_len - tag_len, tmp_tag);
+	debug_print(mod_srtp, "srtcp computed tag:       %s",
+		    octet_string_hex_string(tmp_tag, tag_len));
+	if (status) {
+	    return ( err_status_auth_fail);
+	}
+	/* compare the tag just computed with the one in the packet */
+	debug_print(mod_srtp, "srtcp tag from packet:    %s",
+	            octet_string_hex_string(auth_tag, tag_len));
+	if (octet_string_is_eq(tmp_tag, auth_tag, tag_len)) {
+	    return ( err_status_auth_fail);
+	}
 
-    /* run auth func over packet, put result into tmp_tag */
-    status = auth_compute(stream->rtcp_auth, (uint8_t*)auth_start,
-                          *pkt_octet_len - tag_len,
-                          tmp_tag);
-    debug_print(mod_srtp, "srtcp computed tag:       %s",
-                octet_string_hex_string(tmp_tag, tag_len));
-    if (status) {
-        return err_status_auth_fail;
-    }
-
-    /* compare the tag just computed with the one in the packet */
-    debug_print(mod_srtp, "srtcp tag from packet:    %s",
-                octet_string_hex_string(auth_tag, tag_len));
-    if (octet_string_is_eq(tmp_tag, auth_tag, tag_len)) {
-        return err_status_auth_fail;
+	/*
+	 * if we're authenticating using a universal hash, put the keystream
+	 * prefix into the authentication tag
+	 */
+	prefix_len = auth_get_prefix_length(stream->rtcp_auth);
+	if (prefix_len) {
+	    status = cipher_output(stream->rtcp_cipher, auth_tag, prefix_len);
+	    debug_print(mod_srtp, "keystream prefix: %s",
+		        octet_string_hex_string(auth_tag, prefix_len));
+	    if (status) {
+		return ( err_status_cipher_fail);
+	    }
+	}
     }
 
     /*
-     * if we're authenticating using a universal hash, put the keystream
-     * prefix into the authentication tag
+     * If GCM mode, set the AAD
      */
-    prefix_len = auth_get_prefix_length(stream->rtcp_auth);
-    if (prefix_len) {
-        status = cipher_output(stream->rtcp_cipher, auth_tag, prefix_len);
-        debug_print(mod_srtp, "keystream prefix: %s",
-                    octet_string_hex_string(auth_tag, prefix_len));
+    if (auth_start && (stream->rtcp_cipher->algorithm == AES_128_GCM_8)) {
+	uint32_t tseq;
+	status = cipher_set_aad(stream->rtcp_cipher, (uint8_t*)hdr, octets_in_rtcp_header);
+         if (status) {
+             return ( err_status_cipher_fail);
+         }
+	/* put the idx# into network byte order */
+        tseq = htonl(*trailer);
+	status = cipher_set_aad(stream->rtcp_cipher, (uint8_t*)&tseq, sizeof(srtcp_trailer_t));
         if (status) {
-            return err_status_cipher_fail;
+            return ( err_status_cipher_fail);
         }
     }
 

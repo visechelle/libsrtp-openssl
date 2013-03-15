@@ -71,6 +71,7 @@ extern cipher_type_t null_cipher;
 extern cipher_type_t aes_icm_openssl;
 extern cipher_type_t aes_icm_192_openssl;
 extern cipher_type_t aes_icm_256_openssl;
+extern cipher_type_t aes_gcm_128_8_openssl;
 
 
 /*
@@ -161,6 +162,10 @@ crypto_kernel_init ()
         return status;
     }
     status = crypto_kernel_load_cipher_type(&aes_icm_256_openssl, AES_256_ICM);
+    if (status) {
+        return status;
+    }
+    status = crypto_kernel_load_cipher_type(&aes_gcm_128_8_openssl, AES_128_GCM_8);
     if (status) {
         return status;
     }

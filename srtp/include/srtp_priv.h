@@ -201,7 +201,7 @@ typedef struct srtp_stream_ctx_t {
     uint32_t ssrc;
     cipher_t  *rtp_cipher;
     auth_t    *rtp_auth;
-    rdbx_t rtp_rdbx;
+    rdbx_t     rtp_rdbx;
     sec_serv_t rtp_services;
     cipher_t  *rtcp_cipher;
     auth_t    *rtcp_auth;
@@ -210,7 +210,9 @@ typedef struct srtp_stream_ctx_t {
     key_limit_ctx_t *limit;
     direction_t direction;
     int        allow_repeat_tx;
-    struct srtp_stream_ctx_t *next; /* linked list of streams */
+    struct     srtp_stream_ctx_t *next; /* linked list of streams */
+    uint8_t    salt[12];  /* used with GCM/CCM mode for SRTP */
+    uint8_t    c_salt[12];  /* used with GCM/CCM mode for SRTCP */
 } srtp_stream_ctx_t;
 
 
